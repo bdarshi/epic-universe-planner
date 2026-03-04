@@ -133,7 +133,7 @@ function getWait(id, hour, hasExpress, crowd) {
 }
 
 // ─── SCHEDULE BUILDER ────────────────────────────────────────────────────────
-function buildSchedule({ vibeKey, hasExpress, startMins, endMins, crowd, heights }) {
+function buildSchedule({ vibeKey, hasExpress, startMins, endMins, crowd, heights, getWaitFn }) {
   const vibe = VIBE[vibeKey];
   const dStyle = vibe.diningStyle;
   let cur = startMins;
@@ -187,7 +187,8 @@ function buildSchedule({ vibeKey, hasExpress, startMins, endMins, crowd, heights
         cur += 10;
       }
 
-      const wait = getWait(ride.id, Math.floor(cur/60), hasExpress, crowd);
+      const waitFn = getWaitFn ?? getWait;
+      const wait = waitFn(ride.id, Math.floor(cur/60), hasExpress, crowd);
       const total = ride.isShow ? ride.dur + 3 : wait + ride.dur + 2;
       if (cur + total > endMins) continue;
 
@@ -303,6 +304,8 @@ export default function App() {
   const [copied, setCopied] = useState(false);
   const [dragIdx, setDragIdx] = useState(null);
   const [dragOverIdx, setDragOverIdx] = useState(null);
+  const [liveWaits, setLiveWaits] = useState({});
+  const [liveStatus, setLiveStatus] = useState("loading");
 
   const heights = riders.map(r=>r.height).filter(h=>h>0);
   const minH = heights.length ? Math.min(...heights) : 0;
@@ -312,8 +315,35 @@ export default function App() {
 
   const nav = s => { window.scrollTo(0,0); setScreen(s); };
 
+  useEffect(() => {
+    const fetchWaits = () => {
+      fetch("/api/waittimes")
+        .then(r => r.json())
+        .then(data => {
+          if (data.waits && Object.keys(data.waits).length > 0) {
+            setLiveWaits(data.waits);
+            setLiveStatus(data.stale ? "stale" : "live");
+          } else { setLiveStatus("failed"); }
+        })
+        .catch(() => setLiveStatus("failed"));
+    };
+    fetchWaits();
+    const interval = setInterval(fetchWaits, 5 * 60 * 1000);
+    return () => clearInterval(interval);
+  }, []);
+
+  const getWaitWithLive = (id, hour, hasExp, crowdType) => {
+    if (liveWaits[id] != null) {
+      const live = liveWaits[id];
+      const ride = RIDES.find(r => r.id === id);
+      if (hasExp && ride?.express) return Math.max(5, Math.round(live * 0.48));
+      return live;
+    }
+    return getWait(id, hour, hasExp, crowdType);
+  };
+
   const generate = () => {
-    const result = buildSchedule({ vibeKey:vibe, hasExpress, startMins, endMins, crowd, heights });
+    const result = buildSchedule({ vibeKey:vibe, hasExpress, startMins, endMins, crowd, heights, getWaitFn:getWaitWithLive });
     setSchedule(result.scheduled);
     setBonusRides(result.bonus);
     setActiveLand(result.scheduled.find(x=>x.land)?.land ?? LANDS[0]);
@@ -534,7 +564,13 @@ export default function App() {
             <span style={{color:"#FBBF24"}}>⏱ {totalWait>=60?`${Math.floor(totalWait/60)}h ${totalWait%60}m`:`${totalWait}m`} waiting</span>
           </div>
         </div>
-        <LandBar items={schedule} activeLand={activeLand}/>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:5}}>
+          <LandBar items={schedule} activeLand={activeLand}/>
+          <div style={{flexShrink:0,marginLeft:8,display:"flex",alignItems:"center",gap:4,padding:"2px 8px",borderRadius:20,background:liveStatus==="live"?al("#34D399",0.12):liveStatus==="loading"?al("#FBBF24",0.1):al("#64748b",0.1),border:`1px solid ${liveStatus==="live"?al("#34D399",0.3):liveStatus==="loading"?al("#FBBF24",0.25):"rgba(255,255,255,0.08)"}`}}>
+            <div style={{width:6,height:6,borderRadius:"50%",background:liveStatus==="live"?"#34D399":liveStatus==="loading"?"#FBBF24":"#4a5568",animation:liveStatus==="loading"?"pulse 1.5s infinite":"none"}}/>
+            <span style={{fontSize:9,fontWeight:800,color:liveStatus==="live"?"#34D399":liveStatus==="loading"?"#FBBF24":"#4a5568"}}>{liveStatus==="live"?"LIVE WAITS":liveStatus==="loading"?"LOADING...":"EST WAITS"}</span>
+          </div>
+        </div>
         {editMode&&<div style={{marginTop:7,padding:"5px 10px",background:al("#FBBF24",0.08),borderRadius:8,border:`1px solid ${al("#FBBF24",0.2)}`,fontSize:11,color:"#fde68a",fontWeight:700}}>Drag ⠿ to reorder · ✕ to delete · + to add a rest break</div>}
       </div>
 
