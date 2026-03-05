@@ -188,7 +188,7 @@ function buildSchedule({ vibeKey, hasExpress, startMins, endMins, crowd, heights
       }
 
       const waitFn = getWaitFn ?? getWait;
-      const wait = waitFn(ride.id, Math.floor(cur/60), hasExpress, crowd);
+      const wait = waitFn(ride.id, Math.floor(cur/60), hasExpress, crowd, cur);
       const total = ride.isShow ? ride.dur + 3 : wait + ride.dur + 2;
       if (cur + total > endMins) continue;
 
@@ -315,6 +315,25 @@ export default function App() {
 
   const nav = s => { window.scrollTo(0,0); setScreen(s); };
 
+  // ── ORLANDO TIME HELPERS ──────────────────────────────────────────────────
+  const getOrlandoHour = () => {
+    return parseInt(new Date().toLocaleString("en-US", {
+      timeZone: "America/New_York", hour: "numeric", hour12: false
+    }), 10);
+  };
+
+  const getNowMins = () => {
+    const now = new Date();
+    return now.getHours() * 60 + now.getMinutes();
+  };
+
+  const parkIsOpen = (waits) => {
+    const orlandoHour = getOrlandoHour();
+    if (orlandoHour < 8 || orlandoHour >= 21) return false;
+    const reporting = Object.values(waits).filter(w => w > 0).length;
+    return reporting >= 4;
+  };
+
   useEffect(() => {
     const fetchWaits = () => {
       fetch("/api/waittimes")
@@ -322,7 +341,9 @@ export default function App() {
         .then(data => {
           if (data.waits && Object.keys(data.waits).length > 0) {
             setLiveWaits(data.waits);
-            setLiveStatus(data.stale ? "stale" : "live");
+            // Only mark as live if park is actually open in Orlando
+            const open = parkIsOpen(data.waits);
+            setLiveStatus(open ? (data.stale ? "stale" : "live") : "closed");
           } else { setLiveStatus("failed"); }
         })
         .catch(() => setLiveStatus("failed"));
@@ -332,14 +353,42 @@ export default function App() {
     return () => clearInterval(interval);
   }, []);
 
-  const getWaitWithLive = (id, hour, hasExp, crowdType) => {
-    if (liveWaits[id] != null) {
-      const live = liveWaits[id];
+  // Smart wait blending:
+  // - Park closed / before open / after 9pm Orlando → 100% historical
+  // - Scheduled within 45min of now → 100% live
+  // - Scheduled 45-90min from now → 50/50 blend
+  // - Scheduled 90min+ from now → 100% historical at that future hour
+  const getWaitWithLive = (id, scheduledHour, hasExp, crowdType, scheduledMins) => {
+    const applyExpress = (w) => {
       const ride = RIDES.find(r => r.id === id);
-      if (hasExp && ride?.express) return Math.max(5, Math.round(live * 0.48));
-      return live;
+      if (hasExp && ride?.express) return Math.max(5, Math.round(w * 0.48));
+      return w;
+    };
+
+    const historical = getWait(id, scheduledHour, hasExp, crowdType);
+
+    // If park is closed or we have no live data, use historical
+    if (liveStatus === "closed" || liveStatus === "failed" || liveStatus === "loading") {
+      return historical;
     }
-    return getWait(id, hour, hasExp, crowdType);
+
+    const live = liveWaits[id];
+    if (live == null) return historical;
+
+    const nowMins = getNowMins();
+    const delta = (scheduledMins ?? scheduledHour * 60) - nowMins;
+
+    if (delta < 45) {
+      // Very soon — use live directly
+      return applyExpress(live);
+    } else if (delta < 90) {
+      // Approaching — blend 50/50 live + historical
+      const blended = Math.round((live + historical) / 2);
+      return applyExpress(blended);
+    } else {
+      // Far out — use historical curve for that future time slot
+      return historical;
+    }
   };
 
   const generate = () => {
@@ -566,9 +615,9 @@ export default function App() {
         </div>
         <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:5}}>
           <LandBar items={schedule} activeLand={activeLand}/>
-          <div style={{flexShrink:0,marginLeft:8,display:"flex",alignItems:"center",gap:4,padding:"2px 8px",borderRadius:20,background:liveStatus==="live"?al("#34D399",0.12):liveStatus==="loading"?al("#FBBF24",0.1):al("#64748b",0.1),border:`1px solid ${liveStatus==="live"?al("#34D399",0.3):liveStatus==="loading"?al("#FBBF24",0.25):"rgba(255,255,255,0.08)"}`}}>
-            <div style={{width:6,height:6,borderRadius:"50%",background:liveStatus==="live"?"#34D399":liveStatus==="loading"?"#FBBF24":"#4a5568",animation:liveStatus==="loading"?"pulse 1.5s infinite":"none"}}/>
-            <span style={{fontSize:9,fontWeight:800,color:liveStatus==="live"?"#34D399":liveStatus==="loading"?"#FBBF24":"#4a5568"}}>{liveStatus==="live"?"LIVE WAITS":liveStatus==="loading"?"LOADING...":"EST WAITS"}</span>
+          <div style={{flexShrink:0,marginLeft:8,display:"flex",alignItems:"center",gap:4,padding:"2px 8px",borderRadius:20,background:liveStatus==="live"?al("#34D399",0.12):liveStatus==="loading"?al("#FBBF24",0.1):liveStatus==="closed"?al("#A78BFA",0.1):al("#64748b",0.1),border:`1px solid ${liveStatus==="live"?al("#34D399",0.3):liveStatus==="loading"?al("#FBBF24",0.25):liveStatus==="closed"?al("#A78BFA",0.25):"rgba(255,255,255,0.08)"}`}}>
+            <div style={{width:6,height:6,borderRadius:"50%",background:liveStatus==="live"?"#34D399":liveStatus==="loading"?"#FBBF24":liveStatus==="closed"?"#A78BFA":"#4a5568",animation:liveStatus==="loading"?"pulse 1.5s infinite":"none"}}/>
+            <span style={{fontSize:9,fontWeight:800,color:liveStatus==="live"?"#34D399":liveStatus==="loading"?"#FBBF24":"#4a5568"}}>{liveStatus==="live"?"LIVE WAITS":liveStatus==="loading"?"LOADING...":liveStatus==="closed"?"PARK CLOSED":"EST WAITS"}</span>
           </div>
         </div>
         {editMode&&<div style={{marginTop:7,padding:"5px 10px",background:al("#FBBF24",0.08),borderRadius:8,border:`1px solid ${al("#FBBF24",0.2)}`,fontSize:11,color:"#fde68a",fontWeight:700}}>Drag ⠿ to reorder · ✕ to delete · + to add a rest break</div>}
